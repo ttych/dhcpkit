@@ -1,0 +1,135 @@
+#!/bin/sh
+
+_SCRIPT_NAME="dhcpkit"
+
+SCRIPT_NAME="${0##*/}"
+SCRIPT_RPATH="${0%$SCRIPT_NAME}"
+SCRIPT_PATH=`cd "${SCRIPT_RPATH:-.}" && pwd`
+
+
+TRUE()
+{
+    return 0
+}
+
+FALSE()
+{
+    return 1
+}
+
+
+LOCKFILE="$SCRIPT_PATH/$_SCRIPT_NAME.lock"
+
+
+_exit()
+{
+    _lock_clean
+	exit "$@"
+}
+
+
+_lock_clean()
+{
+	if [ -e $LOCKFILE ]; then
+        rm -f "$LOCKFILE"
+    fi
+}
+
+_lock () {
+    _lock__process=
+	if [ -r $LOCKFILE ] ; then
+		_lock__process=$(cat "$LOCKFILE")
+	fi
+
+	if ps -p "$_lock__process" >/dev/null 2>&1 ; then
+		echo "process $_lock__process is already running (locking)."
+		return 1
+	else
+        _lock_clean
+		echo $$ > "$LOCKFILE"
+	fi
+}
+
+
+usage()
+{
+    usage__exit=0
+
+    if [ -n "$1" ]; then
+        echo "$@"
+        usage__exit=1
+    fi
+
+    cat <<EOF
+Usage:
+  $0 [-h] [opts]
+
+Global actions:
+  -B : bootstrap
+  -I : init directory tree
+  -M : merge to dhcpd.conf
+  -C : add host
+  -N : add network
+  -G : add group
+  -X : debug
+  -D : delete
+
+Network options: -N
+
+Group options: -G
+
+Host options: -C
+
+
+EOF
+
+    _exit "$usage__exit"
+}
+
+
+dhcpkit()
+{
+
+    while getopts :hBIMXDNGC opt ; do
+        case "$opt" in
+            B)
+                # FIXME
+                ;;
+            I)
+                # FIXME
+                ;;
+            M)
+                # FIXME
+                ;;
+            X)
+                DEBUG=TRUE
+                set -xv
+                ;;
+            D)
+                # FIXME
+                ;;
+            N)
+                # FIXME
+                ;;
+            G)
+                # FIXME
+                ;;
+            C)
+                # FIXME
+                ;;
+            *)
+                usage "Unknown option \"$opt\""
+                ;;
+        esac
+    done
+
+    _lock || exit 1
+    _exit "$?"
+}
+
+
+########## run
+
+if [ "$SCRIPT_NAME" = "$_SCRIPT_NAME" ]; then
+    dhcpkit "$@"
+fi
