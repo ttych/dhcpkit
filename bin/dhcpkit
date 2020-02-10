@@ -211,16 +211,6 @@ dhcp_cat_f()
     [ -r "$1" ] || return 1
     cat "$1" | dhcp_indent "${2:-0}"
 }
-#     dhcp_cat_f__file="$1"
-#     dhcp_cat_f__level="${2:-0}"
-#     dhcp_cat_f__indent=
-#     dhcp_cat_f__i="$dhcp_cat_f__level"
-#     while [ "$dhcp_cat_f__i" -gt 0 ]; do
-#         dhcp_cat_f__indent="${dhcp_cat_f__indent}${INDENT_STEP}"
-#         dhcp_cat_f__i=$(($dhcp_cat_f__i - 1))
-#     done
-#     cat "$dhcp_cat_f__file" | sed -e "s/^/$dhcp_cat_f__indent/"
-# }
 
 dhcp_cat()
 (
@@ -277,7 +267,7 @@ dhcp_build()
     if dhcp_merge_conf "$dhcp_build" && dhcp_validate_conf "$dhcp_build"; then
         mv -f "$dhcp_build" "$DHCPD_CONF"
     else
-        #rm -f "$dhcp_build"
+        rm -f "$dhcp_build"
         return 1
     fi
 }
@@ -627,8 +617,3 @@ dhcpkit()
 if [ "$SCRIPT_NAME" = "$_SCRIPT_NAME" ]; then
     dhcpkit "$@"
 fi
-
-
-# ADD group
-# DEL group
-# duplicate mac
