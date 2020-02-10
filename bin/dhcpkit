@@ -6,6 +6,16 @@ SCRIPT_NAME="${0##*/}"
 SCRIPT_RPATH="${0%$SCRIPT_NAME}"
 SCRIPT_PATH=`cd "${SCRIPT_RPATH:-.}" && pwd`
 
+DHCPD_CONF_BD="${DHCPD_CONF_BASE_DIR:-$PWD}"
+DHCPD_CONF="$DHCPD_CONF_BD/dhcpd.conf"
+DHCPD_CONF_D="$DHCPD_CONF.d"
+DHCPD=dhcpd
+LOCKFILE="$DHCPD_CONF_BD/$_SCRIPT_NAME.lock"
+DEFAULT_DOMAIN_NAME="${DEFAULT_DOMAIN_NAME:-none}"
+DEFAULT_NAME_SERVERS="${DEFAULT_NAME_SERVERS:-8.8.8.8}"
+DEFAULT_LEASE_TIME="${DEFAULT_LEASE_TIME:-86400}"
+DEFAULT_MAX_LEASE_TIME="${DEFAULT_MAX_LEASE_TIME:-172800}"
+INDENT_STEP='  '
 
 TRUE()
 {
@@ -16,9 +26,6 @@ FALSE()
 {
     return 1
 }
-
-
-LOCKFILE="$SCRIPT_PATH/$_SCRIPT_NAME.lock"
 
 
 _exit()
@@ -35,7 +42,8 @@ _lock_clean()
     fi
 }
 
-_lock () {
+_lock()
+{
     _lock__process=
 	if [ -r $LOCKFILE ] ; then
 		_lock__process=$(cat "$LOCKFILE")
@@ -50,81 +58,567 @@ _lock () {
 	fi
 }
 
-
-usage()
+_lock_do()
 {
-    usage__exit=0
+    _lock || return 1
+    "$@"
+    _lock_do__status="$?"
+    _lock_clean
+    return $_lock_do__status
+}
+
+
+_err()
+{
+    echo >&2 "$@"
+}
+
+_err_usage()
+{
+    _err "$@"
+    _err ""
+    dhcp_usage
+    exit 1
+}
+
+_makedir()
+{
+	[ -d "$1" ] && return 0
+	mkdir "$1" || {
+		_err "cannot create $1"
+		return 1
+	}
+}
+
+
+dhcp_usage()
+{
+    dhcp_usage__exit=0
 
     if [ -n "$1" ]; then
         echo "$@"
-        usage__exit=1
+        dhcp_usage__exit=1
     fi
 
     cat <<EOF
 Usage:
-  $0 [-h] [opts]
+  $0 <action> <action opts>
 
-Global actions:
-  -B : bootstrap
-  -I : init directory tree
-  -M : merge to dhcpd.conf
-  -C : add host
-  -N : add network
-  -G : add group
-  -X : debug
-  -D : delete
-
-Network options: -N
-
-Group options: -G
-
-Host options: -C
-
-
+Actions:
+  h | help          :  help, usage
+  i | init          :  init dhcpd.d tree
+  n | net | network :  network add / delete
+     add    -s <subnet> -n <netmask> -g <gateway> -r <range> -l <lease> -L <max-lease> -d <domain> -e <nameservers> -p <location>
+     delete -s <subnet> -n <netmask>
 EOF
 
-    _exit "$usage__exit"
+    return "$dhcp_usage__exit"
+}
+
+
+dhcp_base_header()
+{
+    cat <<-EOF
+		option domain-name "$1";
+		option domain-name-servers $2;
+
+		# ddns-updates on;
+		# ddns-update-style interim;
+		# update-static-leases on;
+		# key rndc-key { algorithm hmac-md5; secret abcd;}
+
+		default-lease-time $3;
+		max-lease-time $4;
+
+		authoritative;
+
+		allow unknown-clients;
+
+		use-host-decl-names on;
+	EOF
+}
+
+dhcp_location_for()
+{
+    :
+}
+
+dhcp_header_set()
+{
+    dhcp_header_set__location="$1"
+    dhcp_header_set__content="$2"
+    [ -z "$dhcp_header_set__location" ] && return 1
+    [ -z "$dhcp_header_set__content" ] && return 0
+    _makedir "$dhcp_header_set__location"
+    echo "$dhcp_header_set__content" > "$dhcp_header_set__location/00header"
+}
+
+dhcp_footer_set()
+{
+    dhcp_footer_set__location="$1"
+    dhcp_footer_set__content="$2"
+    [ -z "$dhcp_footer_set__location" ] && return 1
+    [ -z "$dhcp_footer_set__content" ] && return 0
+    _makedir "$dhcp_footer_set__location"
+    echo "$dhcp_footer_set__content" > "$dhcp_footer_set__location/99footer"
+}
+
+dhcp_init()
+{
+    domain_name="$DEFAULT_DOMAIN_NAME"
+    domain_name_servers="$DEFAULT_NAME_SERVERS"
+    default_lease_time="$DEFAULT_LEASE_TIME"
+    max_lease_time="$DEFAULT_MAX_LEASE_TIME"
+    default_group=TRUE
+
+    OPTIND=1
+    while getopts :d:n:l:L: opt; do
+        case "$opt" in
+            d) domain_name="$OPTARG" ;;
+            n) domain_name_servers="$OPTARG" ;;
+            l) default_lease_time="$OPTARG" ;;
+            L) max_lease_time="$OPTARG" ;;
+            *) _err "unknown option $opt for init action"
+               return 1 ;;
+        esac
+    done
+
+    base_header=$(dhcp_base_header "$domain_name" \
+                                   "$domain_name_servers" \
+                                   "$default_lease_time" \
+                                   "$max_lease_time")
+    dhcp_header_set "$DHCPD_CONF_D" "$base_header" || return 1
+}
+
+dhcp_indent()
+{
+    dhcp_indent__level="${1:-0}"
+    dhcp_indent__indent=
+    dhcp_indent__i="$dhcp_indent__level"
+    while [ "$dhcp_indent__i" -gt 0 ]; do
+        dhcp_indent__indent="${dhcp_indent__indent}${INDENT_STEP}"
+        dhcp_indent__i=$(($dhcp_indent__i - 1))
+    done
+
+    cat - | sed -e "s/^/$dhcp_indent__indent/"
+    # while read dhcp_indent__line; do
+    #     printf "%s%s\n" "$dhcp_indent__indent" "$dhcp_indent__line"
+    # done
+}
+
+dhcp_cat_f()
+{
+    [ -r "$1" ] || return 1
+    cat "$1" | dhcp_indent "${2:-0}"
+}
+#     dhcp_cat_f__file="$1"
+#     dhcp_cat_f__level="${2:-0}"
+#     dhcp_cat_f__indent=
+#     dhcp_cat_f__i="$dhcp_cat_f__level"
+#     while [ "$dhcp_cat_f__i" -gt 0 ]; do
+#         dhcp_cat_f__indent="${dhcp_cat_f__indent}${INDENT_STEP}"
+#         dhcp_cat_f__i=$(($dhcp_cat_f__i - 1))
+#     done
+#     cat "$dhcp_cat_f__file" | sed -e "s/^/$dhcp_cat_f__indent/"
+# }
+
+dhcp_cat()
+(
+    [ -d "$1" ] || return 1
+    cd "$1" || return 1
+    level="$2"
+
+    if [ -f 00header ]; then
+        dhcp_cat_f 00header $level
+    fi
+    for f in *; do
+        [ -d "$f" ] && continue
+        [ "$f" = 00header ] && continue
+        [ "$f" = 99footer ] && continue
+        [ "${f#_}" != "$f" ] && continue
+        dhcp_cat_f "$f" $((${level:-0} + 1))
+    done
+    for d in */; do
+        case "$d" in
+            _*|'*/') continue ;;
+            *) dhcp_cat "$d" $((${level:-0} + 1));;
+        esac
+    done
+    if [ -f 99footer ]; then
+        dhcp_cat_f 99footer $level
+    fi
+)
+
+dhcp_merge_conf()
+{
+    [ -z "$1" ] && return 1
+    (
+        dhcp_cat "$DHCPD_CONF_D" 0
+    ) > "$1"
+}
+
+dhcp_validate_conf()
+{
+	which "$DHCPD" >/dev/null 2>&1 || {
+		echo >&2 "$DHCPD not found, skip $1 validation"
+		return 0
+	}
+	"$DHCPD" -t -cf "$1" || {
+		echo >&2 "wrong dhcpd conf file: $1."
+		return 1
+	}
+	return 0
+}
+
+dhcp_build()
+{
+    dhcp_build=/tmp/dhcpd.conf.$$
+
+    if dhcp_merge_conf "$dhcp_build" && dhcp_validate_conf "$dhcp_build"; then
+        mv -f "$dhcp_build" "$DHCPD_CONF"
+    else
+        #rm -f "$dhcp_build"
+        return 1
+    fi
+}
+
+
+dhcp_network_add()
+{
+    dhcp_network_add__subnet=
+    dhcp_network_add__netmask=
+    dhcp_network_add__gateway=
+    dhcp_network_add__range=
+    dhcp_network_add__lease=
+    dhcp_network_add__max_lease=
+    dhcp_network_add__domain=
+    dhcp_network_add__nameservers=
+    dhcp_network_add__location=
+
+    OPTIND=1
+    while getopts :s:n:g:r:l:L:d:e:p: opt; do
+        case "$opt" in
+            s) dhcp_network_add__subnet="$OPTARG" ;;
+            n) dhcp_network_add__netmask="$OPTARG" ;;
+            g) dhcp_network_add__gateway="$OPTARG" ;;
+            r) dhcp_network_add__range="$OPTARG" ;;
+            l) dhcp_network_add__lease="$OPTARG" ;;
+            L) dhcp_network_add__max_lease="$OPTARG" ;;
+            d) dhcp_network_add__domain="$OPTARG" ;;
+            e) dhcp_network_add__nameservers="$OPTARG" ;;
+            p) dhcp_network_add__location="$OPTARG" ;;
+            *) _err_usage "unknown option -$OPTARG to network add" ;;
+        esac
+    done
+
+    if [ -z "$dhcp_network_add__subnet" ]; then
+        _err "empty subnet value"
+        return 1
+    fi
+    if [ -z "$dhcp_network_add__netmask" ]; then
+        _err "empty netmask value"
+        return 1
+    fi
+
+    # FIXME: location
+    dhcp_network_add__dir="$DHCPD_CONF_D/${dhcp_network_add__location:+$dhcp_network_add__location/}network:${dhcp_network_add__subnet}-${dhcp_network_add__netmask}"
+
+    dhcp_network_add__header=$(
+        echo "subnet ${dhcp_network_add__subnet} netmask ${dhcp_network_add__netmask} {"
+        [ -n "$dhcp_network_add__gateway" ] &&
+            echo "  option routers ${dhcp_network_add__gateway};"
+        [ -n "$dhcp_network_add__lease" ] &&
+            echo "  default-lease-time ${dhcp_network_add__lease};"
+        [ -n "$dhcp_network_add__max_lease" ] &&
+            echo "  max-lease-time ${dhcp_network_add__max_lease};"
+        [ -n "$dhcp_network_add__domain" ] &&
+            echo "  domain-name-servers ${dhcp_network_add__domain};"
+        [ -n "$dhcp_network_add__nameservers" ] &&
+            echo "  domain-name-servers ${dhcp_network_add__nameservers};"
+        [ -n "$dhcp_network_add__range" ] &&
+            echo "  range ${dhcp_network_add__range};"
+                               )
+    dhcp_network_add__footer='}'
+
+    dhcp_header_set "$dhcp_network_add__dir" "$dhcp_network_add__header" || return 1
+    dhcp_footer_set "$dhcp_network_add__dir" "$dhcp_network_add__footer" || return 1
+}
+
+dhcp_network_delete()
+{
+    dhcp_network_delete__subnet=
+    dhcp_network_delete__netmask=
+    dhcp_network_delete__location=
+
+    OPTIND=1
+    while getopts :s:n:p: opt; do
+        case "$opt" in
+            s) dhcp_network_delete__subnet="$OPTARG" ;;
+            n) dhcp_network_delete__netmask="$OPTARG" ;;
+            p) dhcp_network_delete_location="$OPTARG" ;;
+            *) _err_usage "unknown option -$OPTARG to network delete" ;;
+        esac
+    done
+
+    if [ -z "$dhcp_network_delete__subnet" ]; then
+        _err "-s <subnet> is a mandatory option"
+        return 1
+    fi
+
+    # FIXME: location
+    dhcp_network_delete__dir="$DHCPD_CONF_D/${dhcp_network_delete_location:+$dhcp_network_delete_location/}"
+
+    dhcp_network_delete__pattern="network:${dhcp_network_delete__subnet}-${dhcp_network_delete__netmask:-*}"
+
+    find "$dhcp_network_delete__dir" -type d -name "$dhcp_network_delete__pattern" | while read dhcp_network_delete__d; do
+        rm -Rf "$dhcp_network_delete__d"
+    done
+}
+
+
+dhcp_host_add()
+{
+    dhcp_host_add__host=
+    dhcp_host_add__mac=
+    dhcp_host_add__location=
+    dhcp_host_add__ip4=
+    dhcp_host_add__filename=
+
+    OPTIND=1
+    while getopts :h:m:p:4:f: opt; do
+        case "$opt" in
+            h) dhcp_host_add__host="$OPTARG" ;;
+            m) dhcp_host_add__mac="$OPTARG" ;;
+            p) dhcp_host_add__location="$OPTARG" ;;
+            4) dhcp_host_add__ip4="$OPTARG" ;;
+            f) dhcp_host_add__filename="$OPTARG" ;;
+        esac
+    done
+
+    if [ -z "$dhcp_host_add__host" ]; then
+        _err "-h <host> is a mandatory option"
+        return 1
+    fi
+    if [ -Z "$dhcp_host_add__mac" ]; then
+        _err "-m <mac> is a mandatory option"
+        return 1
+    fi
+
+    # FIXME: location
+    dhcp_host_add__file="$DHCPD_CONF_D/${dhcp_host_add__location}/host:${dhcp_host_add__host}"
+
+    (
+        echo "host ${dhcp_host_add__host} {"
+        echo "  option host-name \"${dhcp_host_add__host%%.*}\";";
+        echo "  hardware ethernet ${dhcp_host_add__mac};"
+        [ -n "$dhcp_host_add__ip4" ] && echo "  fixed-address ${dhcp_host_add__ip4};"
+        [ -n "$dhcp_host_add__filename" ] && echo "  filename \"${dhcp_host_add__filename}\";"
+        echo "}"
+    ) > "$dhcp_host_add__file"
+}
+
+dhcp_host_delete()
+{
+    dhcp_host_delete__host=
+    dhcp_host_delete__location=
+
+    OPTIND=1
+    while getopts :h:p: opt; do
+        case "$opt" in
+            h) dhcp_host_delete__host="$OPTARG" ;;
+            p) dhcp_host_delete__location="$OPTARG" ;;
+        esac
+    done
+
+    if [ -z "$dhcp_host_delete__host" ]; then
+        _err "-h <host> is a mandatory option"
+        return 1
+    fi
+
+    # FIXME: location
+    dhcp_host_delete__dir="$DHCPD_CONF_D/${dhcp_host_delete__location}"
+    dhcp_host_delete__f="host:${dhcp_host_delete__host}"
+
+    find "$dhcp_host_delete__dir" -type f -name "$dhcp_host_delete__f" | while read dhcp_host_delete__d; do
+        rm -f "$dhcp_host_delete__d"
+    done
+}
+
+dhcp_group_add()
+{
+    dhcp_group_add__name=
+    dhcp_group_add__options=
+    dhcp_group_add__location=
+
+    OPTIND=1
+    while getopts :n:o:p: opt; do
+        case "$opt" in
+            n) dhcp_group_add__name="$OPTARG" ;;
+            o) dhcp_group_add__options="$OPTARG" ;;
+            p) dhcp_group_add__location="$OPTARG" ;;
+            *) _err_usage "unknown option -$OPTARG to group add" ;;
+        esac
+    done
+
+    if [ -z "$dhcp_group_add__name" ]; then
+        _err "-n <name> is a mandatory option"
+        return 1
+    fi
+
+    # FIXME: location
+    dhcp_group_add__dir="$DHCPD_CONF_D/${dhcp_group_add__location}/group:${dhcp_group_add__name}"
+
+    dhcp_group_add__header=$(
+        echo "group $dhcp_group_add__name {"
+        [ -n "$dhcp_group_add__options" ] &&
+            echo "$dhcp_group_add__options"
+                          )
+    dhcp_group_add__footer='}'
+
+    dhcp_header_set "$dhcp_group_add__dir" "$dhcp_group_add__header" || return 1
+    dhcp_footer_set "$dhcp_group_add__dir" "$dhcp_group_add__footer" || return 1
+}
+
+dhcp_group_delete()
+{
+    dhcp_group_delete__name=
+    dhcp_group_delete__location=
+
+    OPTIND=1
+    while getopts :n:p: opt; do
+        case "$opt" in
+            n) dhcp_group_delete__name="$OPTARG" ;;
+            p) dhcp_group_delete__location="$OPTARG" ;;
+            *) _err_usage "unknown option -$OPTARG to group add" ;;
+        esac
+    done
+
+    if [ -z "$dhcp_group_delete__name" ]; then
+        _err "-n <name> is a mandatory option"
+        return 1
+    fi
+
+    # FIXME: location
+    dhcp_group_delete__dir="$DHCPD_CONF_D/${dhcp_group_delete__location}/group:${dhcp_group_delete__name}"
+    dhcp_group_delete__pattern="group:${dhcp_group_delete__name}"
+
+    find "$dhcp_group_delete__dir" -type d -name "$dhcp_group_delete__pattern" | while read dhcp_group_delete__d; do
+        rm -Rf "$dhcp_group_delete__d"
+    done
+}
+
+
+dhcpkit_help()
+{
+    dhcp_usage "$@"
+}
+
+dhcpkit_init()
+{
+    dhcp_init "$@" &&
+        dhcp_build
+}
+
+dhcpkit_dispatch_add_delete()
+{
+    dhcpkit_dispatch_add_delete__action="$1"
+    dhcpkit_dispatch_add_delete__subaction="$2"
+    shift 2
+
+    case "$dhcpkit_dispatch_add_delete__subaction" in
+        a|add)
+            "dhcp_${dhcpkit_dispatch_add_delete__action}_add" "$@" || return 1
+            ;;
+        d|del|delete)
+            "dhcp_${dhcpkit_dispatch_add_delete__action}_delete" "$@" || return 1
+            ;;
+        *)
+            _err "subaction $dhcpkit_dispatch_add_delete__subaction for action $dhcpkit_dispatch_add_delete__action is not available"
+            return 1
+            ;;
+    esac
+    dhcp_build
+}
+
+dhcpkit_list()
+(
+    dhcpkit_list__d="${1:-$DHCPD_CONF_D}"
+    dhcpkit_list__l="${2:-0}"
+
+    cd "$dhcpkit_list__d" || return 1
+
+    if [ "$dhcpkit_list__d" = "$DHCPD_CONF_D" ]; then
+        echo '--'
+    else
+        echo "|-${dhcpkit_list__d}  (${PWD#$DHCPD_CONF_D/})"
+    fi | dhcp_indent "$dhcpkit_list__l"
+
+    for dhcpkit_list__f in *; do
+        if [ -d "$dhcpkit_list__f" ]; then
+            dhcpkit_list "$dhcpkit_list__f" "$(($dhcpkit_list__l + 1))"
+        elif [ -f "$dhcpkit_list__f" ]; then
+            case "$dhcpkit_list__f" in
+                00header|99footer) continue ;;
+                *) echo "|-${dhcpkit_list__f}" | dhcp_indent "$(($dhcpkit_list__l + 1))"
+                   ;;
+            esac
+        fi
+    done
+)
+
+dhcpkit_build()
+{
+    dhcp_build
 }
 
 
 dhcpkit()
 {
-
-    while getopts :hBIMXDNGC opt ; do
+    DEBUG=FALSE
+    OPTIND=1
+    while getopts :X opt; do
         case "$opt" in
-            B)
-                # FIXME
-                ;;
-            I)
-                # FIXME
-                ;;
-            M)
-                # FIXME
-                ;;
-            X)
-                DEBUG=TRUE
-                set -xv
-                ;;
-            D)
-                # FIXME
-                ;;
-            N)
-                # FIXME
-                ;;
-            G)
-                # FIXME
-                ;;
-            C)
-                # FIXME
-                ;;
-            *)
-                usage "Unknown option \"$opt\""
-                ;;
+            X) set -vx
+               DEBUG=TRUE
+               ;;
         esac
     done
+    shift $(($OPTIND - 1))
 
-    _lock || exit 1
-    _exit "$?"
+    case "$1" in
+        -h|--help|help)
+            dhcpkit_help "$@"
+            ;;
+        i|init)
+            shift
+            _lock_do dhcpkit_init "$@"
+            ;;
+        n|net|network)
+            shift
+            _lock_do dhcpkit_dispatch_add_delete network "$@"
+            ;;
+        h|host)
+            shift
+            _lock_do dhcpkit_dispatch_add_delete host "$@"
+            ;;
+        g|group)
+            shift
+            _lock_do dhcpkit_dispatch_add_delete group "$@"
+            ;;
+        l|list)
+            shift
+            _lock_do dhcpkit_list "$@"
+            ;;
+        b|build)
+            shift
+            _lock_do dhcpkit_build "$@"
+            ;;
+        *)
+            _err "unknown $1 action"
+            _err ""
+            dhcpkit_help
+            ;;
+    esac
 }
 
 
@@ -133,3 +627,8 @@ dhcpkit()
 if [ "$SCRIPT_NAME" = "$_SCRIPT_NAME" ]; then
     dhcpkit "$@"
 fi
+
+
+# ADD group
+# DEL group
+# duplicate mac
